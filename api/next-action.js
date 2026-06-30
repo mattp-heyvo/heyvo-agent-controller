@@ -39,7 +39,6 @@ function isYes(text) {
 
 function isNo(text) {
   const normalized = text.toLowerCase().trim();
-
   return [
     "no",
     "nope",
@@ -62,6 +61,27 @@ function extractNamePart(message) {
   return message.trim();
 }
 
+function promptForState(stateName) {
+  const prompts = {
+    collect_patient_type: "No worries, let's continue. Have you been to the clinic before?",
+    new_collect_preferred_time:
+      "No worries, let's continue. What day or time would suit you?",
+    new_present_slots:
+      "No worries, let's continue. Would Tuesday at 10:30 am or Wednesday at 2:00 pm work?",
+    new_collect_first_name: "No worries, let's continue. Could I please get your first name?",
+    new_collect_last_name: "No worries, let's continue. And your last name?",
+    new_collect_phone: "No worries, let's continue. Could I please get your mobile number?",
+    new_collect_dob:
+      "No worries, let's continue. And your date of birth? Please say it as day, month and year.",
+    new_confirm_booking:
+      "No worries, let's continue. Just to confirm, you’d like to book the intake call with Talia for the time we discussed, correct?",
+    existing_collect_phone:
+      "No worries, let's continue. Could I please grab the phone number on your file?"
+  };
+
+  return prompts[stateName] || "No worries, let's continue. How can I help from here?";
+}
+
 async function getOrCreateCallState(call_id) {
   const { data, error } = await supabase
     .from("call_state")
@@ -69,13 +89,9 @@ async function getOrCreateCallState(call_id) {
     .eq("call_id", call_id)
     .maybeSingle();
 
-  if (error) {
-    throw error;
-  }
+  if (error) throw error;
 
-  if (data) {
-    return data;
-  }
+  if (data) return data;
 
   const { data: newState, error: insertError } = await supabase
     .from("call_state")
@@ -89,9 +105,7 @@ async function getOrCreateCallState(call_id) {
     .select("*")
     .single();
 
-  if (insertError) {
-    throw insertError;
-  }
+  if (insertError) throw insertError;
 
   return newState;
 }
@@ -115,10 +129,7 @@ export default async function handler(req, res) {
   try {
     state = await getOrCreateCallState(call_id);
   } catch (error) {
-    return res.status(500).json({
-      ok: false,
-      error: error.message
-    });
+    return res.status(500).json({ ok: false, error: error.message });
   }
 
   const lower = user_message.toLowerCase();
@@ -133,6 +144,7 @@ export default async function handler(req, res) {
     intent = "possible_crisis";
     next_state = "crisis_clarification";
     updates.risk_level = "possible_crisis";
+    updates.resume_state = state.current_state || "greeting";
     reply =
       "I'm sorry, could you please repeat that? I just want to make sure I understood correctly.";
   }
@@ -145,26 +157,29 @@ export default async function handler(req, res) {
       reply =
         "I'm really sorry you're feeling this way. I'm not equipped to provide crisis support, but if you're in immediate danger please call 000. You can also contact Lifeline on 13 11 14 for immediate support. Would you like me to arrange for someone from the clinic to call you back as soon as possible?";
     } else {
-      next_state = state.previous_state || "greeting";
+      next_state = state.resume_state || state.previous_state || "greeting";
       updates.risk_level = "normal";
-      reply = "Thanks for clarifying. No worries — how can I help from here?";
+      updates.resume_state = null;
+      reply = promptForState(next_state);
     }
   }
 
   else if (includesAny(lower, PRICE_TERMS)) {
     intent = "general_question";
-    updates.previous_state_before_question = state.current_state;
     next_state = "answer_question";
+    updates.resume_state = state.current_state || "greeting";
     reply =
       "Fees vary depending on the practitioner and appointment type. For new patients, the first step is usually a fifteen-minute intake call with Talia. Would you like to continue with your booking?";
   }
 
   else if (state.current_state === "answer_question") {
     if (isYes(lower)) {
-      next_state = state.previous_state || "collect_patient_type";
-      reply = "No worries, let's continue. Have you been to the clinic before?";
+      next_state = state.resume_state || state.previous_state || "collect_patient_type";
+      updates.resume_state = null;
+      reply = promptForState(next_state);
     } else {
       next_state = "close";
+      updates.resume_state = null;
       reply = "No worries at all. Is there anything else I can help with?";
     }
   }
@@ -282,10 +297,7 @@ export default async function handler(req, res) {
     .eq("call_id", call_id);
 
   if (updateError) {
-    return res.status(500).json({
-      ok: false,
-      error: updateError.message
-    });
+    return res.status(500).json({ ok: false, error: updateError.message });
   }
 
   return res.status(200).json({
@@ -293,6 +305,7 @@ export default async function handler(req, res) {
     intent,
     previous_state,
     next_state,
+    resume_state: updates.resume_state ?? state.resume_state,
     reply,
     updates
   });
