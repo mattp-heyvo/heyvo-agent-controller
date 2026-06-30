@@ -10,7 +10,7 @@ const CRISIS_TERMS = [
   "hurt myself", "can't go on", "cant go on"
 ];
 
-const BOOKING_TERMS = ["book", "booking", "appointment", "see someone", "intake"];
+const BOOKING_TERMS = ["book", "booking", "appointment", "see someone", "intake", "skin check", "consultation"];
 
 const QUESTION_STARTERS = [
   "who", "what", "where", "when", "why", "how",
@@ -42,6 +42,29 @@ function isNo(text) {
   ].some((term) => normalized === term || normalized.includes(term));
 }
 
+function extractRetellPayload(body) {
+  const call_id =
+    body?.call_id ||
+    body?.call?.call_id ||
+    body?.call?.id ||
+    body?.callId ||
+    body?.metadata?.call_id ||
+    `retell-${Date.now()}`;
+
+  const user_message =
+    body?.user_message ||
+    body?.args?.user_message ||
+    body?.arguments?.user_message ||
+    body?.input?.user_message ||
+    body?.message ||
+    body?.transcript ||
+    body?.latest_transcript ||
+    body?.last_user_message ||
+    "";
+
+  return { call_id, user_message };
+}
+
 function isMidFlow(stateName) {
   return !["greeting", "close", "crisis_clarification", "crisis_confirmed", "answer_question"].includes(stateName);
 }
@@ -61,23 +84,6 @@ function isGenericInterruption(text, currentState) {
   );
 }
 
-function isOvertalkingOrBargeIn(text, currentState) {
-  const normalized = text.toLowerCase().trim();
-
-  if (currentState !== "greeting") return false;
-
-  return (
-    normalized.length < 40 ||
-    normalized.startsWith("hi") ||
-    normalized.startsWith("hello") ||
-    normalized.startsWith("sorry") ||
-    normalized.startsWith("wait") ||
-    normalized.startsWith("actually") ||
-    normalized.startsWith("can i") ||
-    normalized.startsWith("i just")
-  );
-}
-
 function answerGeneralQuestion(text) {
   const lower = text.toLowerCase();
 
@@ -94,15 +100,7 @@ function answerGeneralQuestion(text) {
   }
 
   if (lower.includes("where") || lower.includes("location") || lower.includes("based") || lower.includes("address")) {
-    return "The clinic is based in Melbourne. Reception can help with specific location details if needed. Would you like to continue with your booking?";
-  }
-
-  if (lower.includes("therapist") || lower.includes("psychologist") || lower.includes("clinician") || lower.includes("practitioner")) {
-    return "The clinic has clinical psychologists, general psychologists, mental health social workers, and intake support with Talia. Would you like to continue with your booking?";
-  }
-
-  if (lower.includes("anxiety") || lower.includes("depression") || lower.includes("adhd") || lower.includes("trauma")) {
-    return "The clinic supports a range of mental health concerns. The intake call helps match you with the most suitable clinician. Would you like to continue with your booking?";
+    return "The clinic is based in Invercargill. Reception can help with specific location details if needed. Would you like to continue with your booking?";
   }
 
   return "Good question. Reception can help with the finer details if needed, but I can keep helping you here. Would you like to continue with your booking?";
@@ -116,16 +114,12 @@ function promptForState(stateName) {
     new_collect_first_name: "No worries, let's continue. Could I please get your first name?",
     new_collect_last_name: "No worries, let's continue. And your last name?",
     new_collect_phone: "No worries, let's continue. Could I please get your mobile number?",
-    new_collect_dob: "No worries, let's continue. And your date of birth? Please say it as day, month and year.",
-    new_confirm_booking: "No worries, let's continue. Just to confirm, you’d like to book the intake call with Talia for the time we discussed, correct?",
+    new_collect_dob: "No worries, let's continue. And your date of birth?",
+    new_confirm_booking: "No worries, let's continue. Just to confirm, you’d like to book that appointment, correct?",
     existing_collect_phone: "No worries, let's continue. Could I please grab the phone number on your file?"
   };
 
   return prompts[stateName] || "No worries, let's continue. How can I help from here?";
-}
-
-function extractNamePart(message) {
-  return message.trim();
 }
 
 async function getOrCreateCallState(call_id) {
@@ -159,12 +153,13 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "Use POST" });
   }
 
-  const { call_id, user_message } = req.body;
+  const { call_id, user_message } = extractRetellPayload(req.body || {});
 
-  if (!call_id || !user_message) {
+  if (!user_message) {
     return res.status(400).json({
       ok: false,
-      error: "call_id and user_message are required"
+      error: "user_message is required",
+      received_body: req.body
     });
   }
 
@@ -206,27 +201,6 @@ export default async function handler(req, res) {
     }
   }
 
-  else if (isOvertalkingOrBargeIn(user_message, state.current_state)) {
-    intent = "barge_in";
-    next_state = "listening";
-    updates.resume_state = state.current_state || "greeting";
-    reply = "Of course — go on, I'm listening.";
-  }
-
-  else if (state.current_state === "listening") {
-    if (includesAny(lower, BOOKING_TERMS)) {
-      intent = "book_appointment";
-      next_state = "collect_patient_type";
-      updates.resume_state = null;
-      reply = "Of course. Have you been to the clinic before?";
-    } else {
-      intent = "unclear";
-      next_state = "clarify_intent";
-      updates.resume_state = null;
-      reply = "No worries. Are you looking to book, reschedule, cancel, or ask a general question?";
-    }
-  }
-
   else if (isGenericInterruption(user_message, state.current_state)) {
     intent = "general_question";
     next_state = "answer_question";
@@ -260,7 +234,7 @@ export default async function handler(req, res) {
       intent = "book_appointment";
       updates.patient_type = "new";
       next_state = "new_collect_preferred_time";
-      reply = "No worries. For new patients, the first step is a fifteen-minute intake phone call with Talia. What day or time would suit you?";
+      reply = "No worries. What day or time would suit you?";
     } else if (isYes(lower) || lower.includes("existing") || lower.includes("been before")) {
       intent = "existing_patient_booking";
       updates.patient_type = "existing";
@@ -274,39 +248,31 @@ export default async function handler(req, res) {
   else if (state.current_state === "new_collect_preferred_time") {
     updates.preferred_time = user_message;
     next_state = "new_present_slots";
-    reply = "Perfect, I’ll check available intake times for you. For now, let’s say I have Tuesday at 10:30 am or Wednesday at 2:00 pm. Would either of those work?";
+    reply = "Perfect, I’ll check available times for you. For now, let’s say I have Tuesday at 10:30 am or Wednesday at 2:00 pm. Would either of those work?";
   }
 
   else if (state.current_state === "new_present_slots") {
     updates.selected_slot = user_message;
-    updates.practitioner_name = "Talia";
-    updates.practitioner_role_id = "PR-2021211";
     next_state = "new_collect_first_name";
     reply = "Great. Could I please get your first name?";
   }
 
   else if (state.current_state === "new_collect_first_name") {
-    updates.patient_firstname = extractNamePart(user_message);
+    updates.patient_firstname = user_message.trim();
     next_state = "new_collect_last_name";
     reply = "Thanks. And your last name?";
   }
 
   else if (state.current_state === "new_collect_last_name") {
-    updates.patient_surname = extractNamePart(user_message);
+    updates.patient_surname = user_message.trim();
     next_state = "new_collect_phone";
     reply = "Thanks. Could I please get your mobile number?";
   }
 
   else if (state.current_state === "new_collect_phone") {
     updates.patient_phone = user_message;
-    next_state = "new_collect_dob";
-    reply = "Thanks. And your date of birth? Please say it as day, month and year.";
-  }
-
-  else if (state.current_state === "new_collect_dob") {
-    updates.patient_dob = user_message;
     next_state = "new_confirm_booking";
-    reply = "Perfect. Just to confirm, you’d like to book the intake call with Talia for the time we discussed, correct?";
+    reply = "Perfect. Just to confirm, you’d like to book that appointment, correct?";
   }
 
   else if (state.current_state === "new_confirm_booking") {
@@ -319,15 +285,9 @@ export default async function handler(req, res) {
     }
   }
 
-  else if (state.current_state === "existing_collect_phone") {
-    updates.patient_phone = user_message;
-    next_state = "existing_check_patient";
-    reply = "Thanks. The next step is to check the patient record and then look for available appointments.";
-  }
-
   else {
-    reply = "No worries. I just want to make sure I’m helping properly — are you looking to book, reschedule, cancel, or ask a general question?";
     next_state = "clarify_intent";
+    reply = "No worries. I just want to make sure I’m helping properly — are you looking to book, reschedule, cancel, or ask a general question?";
   }
 
   await supabase.from("call_messages").insert([
@@ -354,6 +314,7 @@ export default async function handler(req, res) {
 
   return res.status(200).json({
     ok: true,
+    call_id,
     intent,
     previous_state,
     next_state,
