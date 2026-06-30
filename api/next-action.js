@@ -48,7 +48,6 @@ function isMidFlow(stateName) {
 
 function isGenericInterruption(text, currentState) {
   const normalized = text.toLowerCase().trim();
-
   if (!isMidFlow(currentState)) return false;
 
   const startsWithQuestion = QUESTION_STARTERS.some((word) =>
