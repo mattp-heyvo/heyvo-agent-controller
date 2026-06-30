@@ -75,17 +75,13 @@ export default async function handler(req, res) {
   let reply = "No worries. How can I help today?";
   let updates = {};
 
-  // 1. Crisis override
   if (includesAny(lower, CRISIS_TERMS)) {
     intent = "possible_crisis";
     next_state = "crisis_clarification";
     updates.risk_level = "possible_crisis";
     reply =
       "I'm sorry, could you please repeat that? I just want to make sure I understood correctly.";
-  }
-
-  // 2. Confirmed crisis after clarification
-  else if (state.current_state === "crisis_clarification") {
+  } else if (state.current_state === "crisis_clarification") {
     if (includesAny(lower, CRISIS_TERMS) || lower.includes("yes")) {
       intent = "confirmed_crisis";
       next_state = "crisis_confirmed";
@@ -98,19 +94,12 @@ export default async function handler(req, res) {
       updates.risk_level = "normal";
       reply = "Thanks for clarifying. No worries — how can I help from here?";
     }
-  }
-
-  // 3. General question interruption
-  else if (includesAny(lower, PRICE_TERMS)) {
+  } else if (includesAny(lower, PRICE_TERMS)) {
     intent = "general_question";
-    updates.previous_state_before_question = state.current_state;
     next_state = "answer_question";
     reply =
       "Fees vary depending on the practitioner and appointment type. For new patients, the first step is usually a fifteen-minute intake call with Talia. Would you like to continue with your booking?";
-  }
-
-  // 4. Resume after general question
-  else if (state.current_state === "answer_question") {
+  } else if (state.current_state === "answer_question") {
     if (isYes(lower)) {
       intent = state.intent || "book_appointment";
       next_state = state.previous_state || "collect_patient_type";
@@ -119,20 +108,14 @@ export default async function handler(req, res) {
       next_state = "close";
       reply = "No worries at all. Is there anything else I can help with?";
     }
-  }
-
-  // 5. Start booking from greeting
-  else if (
+  } else if (
     (state.current_state === "greeting" || !state.current_state) &&
     includesAny(lower, BOOKING_TERMS)
   ) {
     intent = "book_appointment";
     next_state = "collect_patient_type";
     reply = "Of course. Have you been to the clinic before?";
-  }
-
-  // 6. Collect patient type
-  else if (state.current_state === "collect_patient_type") {
+  } else if (state.current_state === "collect_patient_type") {
     if (isNo(lower)) {
       intent = "book_appointment";
       updates.patient_type = "new";
@@ -147,56 +130,35 @@ export default async function handler(req, res) {
     } else {
       reply = "No worries. Are you a new patient, or have you been to the clinic before?";
     }
-  }
-
-  // 7. New patient preferred time
-  else if (state.current_state === "new_collect_preferred_time") {
+  } else if (state.current_state === "new_collect_preferred_time") {
     updates.preferred_time = user_message;
     next_state = "new_present_slots";
     reply =
       "Perfect, I’ll check available intake times for you. For now, let’s say I have Tuesday at 10:30 am or Wednesday at 2:00 pm. Would either of those work?";
-  }
-
-  // 8. Slot selection
-  else if (state.current_state === "new_present_slots") {
-    updates.session_start = user_message;
+  } else if (state.current_state === "new_present_slots") {
+    updates.selected_slot = user_message;
     updates.practitioner_name = "Talia";
     updates.practitioner_role_id = "PR-2021211";
     next_state = "new_collect_first_name";
     reply = "Great. Could I please get your first name?";
-  }
-
-  // 9. First name
-  else if (state.current_state === "new_collect_first_name") {
+  } else if (state.current_state === "new_collect_first_name") {
     updates.patient_firstname = extractNamePart(user_message);
     next_state = "new_collect_last_name";
     reply = "Thanks. And your last name?";
-  }
-
-  // 10. Last name
-  else if (state.current_state === "new_collect_last_name") {
+  } else if (state.current_state === "new_collect_last_name") {
     updates.patient_surname = extractNamePart(user_message);
     next_state = "new_collect_phone";
     reply = "Thanks. Could I please get your mobile number?";
-  }
-
-  // 11. Phone
-  else if (state.current_state === "new_collect_phone") {
+  } else if (state.current_state === "new_collect_phone") {
     updates.patient_phone = user_message;
     next_state = "new_collect_dob";
     reply = "Thanks. And your date of birth? Please say it as day, month and year.";
-  }
-
-  // 12. DOB
-  else if (state.current_state === "new_collect_dob") {
+  } else if (state.current_state === "new_collect_dob") {
     updates.patient_dob = user_message;
     next_state = "new_confirm_booking";
     reply =
       "Perfect. Just to confirm, you’d like to book the intake call with Talia for the time we discussed, correct?";
-  }
-
-  // 13. Confirm new booking
-  else if (state.current_state === "new_confirm_booking") {
+  } else if (state.current_state === "new_confirm_booking") {
     if (isYes(lower)) {
       next_state = "new_create_patient";
       reply =
@@ -205,18 +167,12 @@ export default async function handler(req, res) {
       next_state = "new_collect_preferred_time";
       reply = "No worries. What day or time would suit you instead?";
     }
-  }
-
-  // 14. Existing patient placeholder
-  else if (state.current_state === "existing_collect_phone") {
+  } else if (state.current_state === "existing_collect_phone") {
     updates.patient_phone = user_message;
     next_state = "existing_check_patient";
     reply =
       "Thanks. The next step is to check the patient record and then look for available appointments.";
-  }
-
-  // 15. Fallback
-  else {
+  } else {
     reply =
       "No worries. I just want to make sure I’m helping properly — are you looking to book, reschedule, cancel, or ask a general question?";
     next_state = "clarify_intent";
