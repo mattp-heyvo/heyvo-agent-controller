@@ -10,7 +10,10 @@ const CRISIS_TERMS = [
   "hurt myself", "can't go on", "cant go on"
 ];
 
-const BOOKING_TERMS = ["book", "booking", "appointment", "see someone", "intake", "skin check", "consultation"];
+const BOOKING_TERMS = [
+  "book", "booking", "appointment", "see someone", "intake",
+  "skin check", "consultation", "initial skin consult", "full body skin check"
+];
 
 const QUESTION_STARTERS = [
   "who", "what", "where", "when", "why", "how",
@@ -42,6 +45,12 @@ function isNo(text) {
   ].some((term) => normalized === term || normalized.includes(term));
 }
 
+function getLatestUserMessageFromTranscript(transcript = "") {
+  const matches = transcript.match(/User:\s*(.*)/g);
+  if (!matches || matches.length === 0) return "";
+  return matches[matches.length - 1].replace("User:", "").trim();
+}
+
 function extractRetellPayload(body) {
   const call_id =
     body?.call_id ||
@@ -51,16 +60,20 @@ function extractRetellPayload(body) {
     body?.metadata?.call_id ||
     `retell-${Date.now()}`;
 
+  const transcript =
+    body?.call?.transcript ||
+    body?.transcript ||
+    "";
+
   const user_message =
     body?.user_message ||
     body?.args?.user_message ||
     body?.arguments?.user_message ||
     body?.input?.user_message ||
     body?.message ||
-    body?.transcript ||
     body?.latest_transcript ||
     body?.last_user_message ||
-    "";
+    getLatestUserMessageFromTranscript(transcript);
 
   return { call_id, user_message };
 }
@@ -88,19 +101,19 @@ function answerGeneralQuestion(text) {
   const lower = text.toLowerCase();
 
   if (lower.includes("cost") || lower.includes("price") || lower.includes("fee") || lower.includes("rebate") || lower.includes("medicare")) {
-    return "Fees vary depending on the practitioner and appointment type. Medicare rebates may apply. Would you like to continue with your booking?";
+    return "Fees vary depending on the appointment type. Would you like to continue with your booking?";
   }
 
   if (lower.includes("telehealth") || lower.includes("online") || lower.includes("video")) {
-    return "Yes, telehealth appointments are available, as well as in-clinic appointments. Would you like to continue with your booking?";
+    return "Some appointments may be available by telehealth, depending on the service. Would you like to continue with your booking?";
   }
 
   if (lower.includes("hour") || lower.includes("open") || lower.includes("time")) {
-    return "The clinic is open Monday to Friday, 9am to 6pm, with limited Saturday morning appointments. Would you like to continue with your booking?";
+    return "Clinic hours can vary by day. Reception can confirm the finer details if needed. Would you like to continue with your booking?";
   }
 
   if (lower.includes("where") || lower.includes("location") || lower.includes("based") || lower.includes("address")) {
-    return "The clinic is based in Invercargill. Reception can help with specific location details if needed. Would you like to continue with your booking?";
+    return "The clinic is based in Invercargill. Reception can help with the exact location details if needed. Would you like to continue with your booking?";
   }
 
   return "Good question. Reception can help with the finer details if needed, but I can keep helping you here. Would you like to continue with your booking?";
@@ -114,7 +127,6 @@ function promptForState(stateName) {
     new_collect_first_name: "No worries, let's continue. Could I please get your first name?",
     new_collect_last_name: "No worries, let's continue. And your last name?",
     new_collect_phone: "No worries, let's continue. Could I please get your mobile number?",
-    new_collect_dob: "No worries, let's continue. And your date of birth?",
     new_confirm_booking: "No worries, let's continue. Just to confirm, you’d like to book that appointment, correct?",
     existing_collect_phone: "No worries, let's continue. Could I please grab the phone number on your file?"
   };
@@ -156,10 +168,12 @@ export default async function handler(req, res) {
   const { call_id, user_message } = extractRetellPayload(req.body || {});
 
   if (!user_message) {
-    return res.status(400).json({
-      ok: false,
-      error: "user_message is required",
-      received_body: req.body
+    return res.status(200).json({
+      ok: true,
+      call_id,
+      intent: "listening",
+      next_state: "listening",
+      reply: "Of course — go on, I'm listening."
     });
   }
 
@@ -241,7 +255,7 @@ export default async function handler(req, res) {
       next_state = "existing_collect_phone";
       reply = "No worries. Could I please grab the phone number on your file?";
     } else {
-      reply = "No worries. Are you a new patient, or have you been to the clinic before?";
+      reply = "No worries. Have you been to the clinic before?";
     }
   }
 
