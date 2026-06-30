@@ -39,6 +39,42 @@ function extractNamePart(message) {
   return message.trim();
 }
 
+async function getOrCreateCallState(call_id) {
+  const { data, error } = await supabase
+    .from("call_state")
+    .select("*")
+    .eq("call_id", call_id)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  if (data) {
+    return data;
+  }
+
+  const { data: newState, error: insertError } = await supabase
+    .from("call_state")
+    .insert({
+      call_id,
+      current_state: "greeting",
+      intent: "unclear",
+      risk_level: "normal",
+      last_user_message: null,
+      last_agent_message: null,
+      updated_at: new Date().toISOString()
+    })
+    .select("*")
+    .single();
+
+  if (insertError) {
+    throw insertError;
+  }
+
+  return newState;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Use POST" });
@@ -53,20 +89,17 @@ export default async function handler(req, res) {
     });
   }
 
-  const { data: existingState, error: fetchError } = await supabase
-    .from("call_state")
-    .select("*")
-    .eq("call_id", call_id)
-    .single();
+  let state;
 
-  if (fetchError) {
+  try {
+    state = await getOrCreateCallState(call_id);
+  } catch (error) {
     return res.status(500).json({
       ok: false,
-      error: fetchError.message
+      error: error.message
     });
   }
 
-  const state = existingState || {};
   const lower = user_message.toLowerCase();
 
   let intent = state.intent || "unclear";
@@ -89,7 +122,6 @@ export default async function handler(req, res) {
       reply =
         "I'm really sorry you're feeling this way. I'm not equipped to provide crisis support, but if you're in immediate danger please call 000. You can also contact Lifeline on 13 11 14 for immediate support. Would you like me to arrange for someone from the clinic to call you back as soon as possible?";
     } else {
-      intent = state.intent || "unclear";
       next_state = state.previous_state || "greeting";
       updates.risk_level = "normal";
       reply = "Thanks for clarifying. No worries — how can I help from here?";
@@ -101,7 +133,7 @@ export default async function handler(req, res) {
       "Fees vary depending on the practitioner and appointment type. For new patients, the first step is usually a fifteen-minute intake call with Talia. Would you like to continue with your booking?";
   } else if (state.current_state === "answer_question") {
     if (isYes(lower)) {
-      intent = state.intent || "book_appointment";
+      intent = "book_appointment";
       next_state = state.previous_state || "collect_patient_type";
       reply = "No worries, let's continue. Have you been to the clinic before?";
     } else {
