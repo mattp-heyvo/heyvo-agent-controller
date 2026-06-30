@@ -5,6 +5,40 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+const CRISIS_TERMS = [
+  "suicide",
+  "kill myself",
+  "want to die",
+  "self harm",
+  "self-harm",
+  "hurt myself",
+  "can't go on",
+  "cant go on"
+];
+
+const PRICE_TERMS = ["cost", "price", "fee", "fees", "rebate", "medicare"];
+const BOOKING_TERMS = ["book", "appointment", "see someone", "intake"];
+
+function includesAny(text, terms) {
+  return terms.some((term) => text.includes(term));
+}
+
+function isYes(text) {
+  return ["yes", "yeah", "yep", "correct", "that's right", "that is right", "ok", "okay"].some((term) =>
+    text.includes(term)
+  );
+}
+
+function isNo(text) {
+  return ["no", "nope", "not really", "new", "first time", "haven't", "have not"].some((term) =>
+    text.includes(term)
+  );
+}
+
+function extractNamePart(message) {
+  return message.trim();
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Use POST" });
@@ -19,136 +53,173 @@ export default async function handler(req, res) {
     });
   }
 
-  const { data: state, error } = await supabase
+  const { data: existingState, error: fetchError } = await supabase
     .from("call_state")
     .select("*")
     .eq("call_id", call_id)
     .single();
 
-  if (error) {
-    return res.status(500).json({ ok: false, error: error.message });
+  if (fetchError) {
+    return res.status(500).json({
+      ok: false,
+      error: fetchError.message
+    });
   }
 
+  const state = existingState || {};
   const lower = user_message.toLowerCase();
 
   let intent = state.intent || "unclear";
-  let next_state = state.current_state || "greeting";
-  let previous_state = state.current_state;
+  let previous_state = state.current_state || "greeting";
+  let next_state = previous_state;
   let reply = "No worries. How can I help today?";
   let updates = {};
 
   // 1. Crisis override
-  if (
-    lower.includes("suicide") ||
-    lower.includes("kill myself") ||
-    lower.includes("self harm") ||
-    lower.includes("want to die")
-  ) {
+  if (includesAny(lower, CRISIS_TERMS)) {
     intent = "possible_crisis";
     next_state = "crisis_clarification";
+    updates.risk_level = "possible_crisis";
     reply =
       "I'm sorry, could you please repeat that? I just want to make sure I understood correctly.";
   }
 
-  // 2. General question interruption
-  else if (
-    lower.includes("cost") ||
-    lower.includes("price") ||
-    lower.includes("fee") ||
-    lower.includes("rebate")
-  ) {
-    intent = "general_question";
-    next_state = "answer_question";
-    reply =
-      "Fees vary depending on the practitioner and appointment type. For new patients, the first step is usually a fifteen-minute intake call. Would you like to continue with booking?";
+  // 2. Confirmed crisis after clarification
+  else if (state.current_state === "crisis_clarification") {
+    if (includesAny(lower, CRISIS_TERMS) || lower.includes("yes")) {
+      intent = "confirmed_crisis";
+      next_state = "crisis_confirmed";
+      updates.risk_level = "high";
+      reply =
+        "I'm really sorry you're feeling this way. I'm not equipped to provide crisis support, but if you're in immediate danger please call 000. You can also contact Lifeline on 13 11 14 for immediate support. Would you like me to arrange for someone from the clinic to call you back as soon as possible?";
+    } else {
+      intent = state.intent || "unclear";
+      next_state = state.previous_state || "greeting";
+      updates.risk_level = "normal";
+      reply = "Thanks for clarifying. No worries — how can I help from here?";
+    }
   }
 
-  // 3. Start booking
+  // 3. General question interruption
+  else if (includesAny(lower, PRICE_TERMS)) {
+    intent = "general_question";
+    updates.previous_state_before_question = state.current_state;
+    next_state = "answer_question";
+    reply =
+      "Fees vary depending on the practitioner and appointment type. For new patients, the first step is usually a fifteen-minute intake call with Talia. Would you like to continue with your booking?";
+  }
+
+  // 4. Resume after general question
+  else if (state.current_state === "answer_question") {
+    if (isYes(lower)) {
+      intent = state.intent || "book_appointment";
+      next_state = state.previous_state || "collect_patient_type";
+      reply = "No worries, let's continue. Have you been to the clinic before?";
+    } else {
+      next_state = "close";
+      reply = "No worries at all. Is there anything else I can help with?";
+    }
+  }
+
+  // 5. Start booking from greeting
   else if (
-    next_state === "greeting" &&
-    (lower.includes("book") ||
-      lower.includes("appointment") ||
-      lower.includes("see someone"))
+    (state.current_state === "greeting" || !state.current_state) &&
+    includesAny(lower, BOOKING_TERMS)
   ) {
     intent = "book_appointment";
     next_state = "collect_patient_type";
     reply = "Of course. Have you been to the clinic before?";
   }
 
-  // 4. Patient type
+  // 6. Collect patient type
   else if (state.current_state === "collect_patient_type") {
-    if (lower.includes("no") || lower.includes("new") || lower.includes("first")) {
+    if (isNo(lower)) {
+      intent = "book_appointment";
       updates.patient_type = "new";
-      next_state = "collect_preferred_time";
+      next_state = "new_collect_preferred_time";
       reply =
         "No worries. For new patients, the first step is a fifteen-minute intake phone call with Talia. What day or time would suit you?";
-    } else if (
-      lower.includes("yes") ||
-      lower.includes("existing") ||
-      lower.includes("been before")
-    ) {
+    } else if (isYes(lower) || lower.includes("existing") || lower.includes("been before")) {
+      intent = "existing_patient_booking";
       updates.patient_type = "existing";
-      next_state = "collect_phone";
+      next_state = "existing_collect_phone";
       reply = "No worries. Could I please grab the phone number on your file?";
     } else {
       reply = "No worries. Are you a new patient, or have you been to the clinic before?";
     }
   }
 
-  // 5. Preferred time
-  else if (state.current_state === "collect_preferred_time") {
+  // 7. New patient preferred time
+  else if (state.current_state === "new_collect_preferred_time") {
     updates.preferred_time = user_message;
-    next_state = "present_slots";
+    next_state = "new_present_slots";
     reply =
       "Perfect, I’ll check available intake times for you. For now, let’s say I have Tuesday at 10:30 am or Wednesday at 2:00 pm. Would either of those work?";
   }
 
-  // 6. Slot selection
-  else if (state.current_state === "present_slots") {
+  // 8. Slot selection
+  else if (state.current_state === "new_present_slots") {
     updates.session_start = user_message;
-    next_state = "collect_first_name";
+    updates.practitioner_name = "Talia";
+    updates.practitioner_role_id = "PR-2021211";
+    next_state = "new_collect_first_name";
     reply = "Great. Could I please get your first name?";
   }
 
-  // 7. First name
-  else if (state.current_state === "collect_first_name") {
-    updates.patient_firstname = user_message;
-    next_state = "collect_last_name";
+  // 9. First name
+  else if (state.current_state === "new_collect_first_name") {
+    updates.patient_firstname = extractNamePart(user_message);
+    next_state = "new_collect_last_name";
     reply = "Thanks. And your last name?";
   }
 
-  // 8. Last name
-  else if (state.current_state === "collect_last_name") {
-    updates.patient_surname = user_message;
-    next_state = "collect_phone";
+  // 10. Last name
+  else if (state.current_state === "new_collect_last_name") {
+    updates.patient_surname = extractNamePart(user_message);
+    next_state = "new_collect_phone";
     reply = "Thanks. Could I please get your mobile number?";
   }
 
-  // 9. Phone
-  else if (state.current_state === "collect_phone") {
+  // 11. Phone
+  else if (state.current_state === "new_collect_phone") {
     updates.patient_phone = user_message;
-    next_state = "collect_dob";
+    next_state = "new_collect_dob";
     reply = "Thanks. And your date of birth? Please say it as day, month and year.";
   }
 
-  // 10. DOB
-  else if (state.current_state === "collect_dob") {
+  // 12. DOB
+  else if (state.current_state === "new_collect_dob") {
     updates.patient_dob = user_message;
-    next_state = "confirm_booking";
+    next_state = "new_confirm_booking";
     reply =
       "Perfect. Just to confirm, you’d like to book the intake call with Talia for the time we discussed, correct?";
   }
 
-  // 11. Confirm
-  else if (state.current_state === "confirm_booking") {
-    if (lower.includes("yes") || lower.includes("correct") || lower.includes("that’s right")) {
-      next_state = "booking_complete";
+  // 13. Confirm new booking
+  else if (state.current_state === "new_confirm_booking") {
+    if (isYes(lower)) {
+      next_state = "new_create_patient";
       reply =
-        "Perfect, I’ll get that booked for you now. You’ll receive confirmation from the clinic shortly.";
+        "Perfect, I have everything I need. The next step is to create the patient record and book the appointment.";
     } else {
-      next_state = "collect_preferred_time";
+      next_state = "new_collect_preferred_time";
       reply = "No worries. What day or time would suit you instead?";
     }
+  }
+
+  // 14. Existing patient placeholder
+  else if (state.current_state === "existing_collect_phone") {
+    updates.patient_phone = user_message;
+    next_state = "existing_check_patient";
+    reply =
+      "Thanks. The next step is to check the patient record and then look for available appointments.";
+  }
+
+  // 15. Fallback
+  else {
+    reply =
+      "No worries. I just want to make sure I’m helping properly — are you looking to book, reschedule, cancel, or ask a general question?";
+    next_state = "clarify_intent";
   }
 
   await supabase.from("call_messages").insert([
@@ -156,7 +227,7 @@ export default async function handler(req, res) {
     { call_id, role: "assistant", message: reply }
   ]);
 
-  await supabase
+  const { error: updateError } = await supabase
     .from("call_state")
     .update({
       current_state: next_state,
@@ -168,6 +239,13 @@ export default async function handler(req, res) {
       ...updates
     })
     .eq("call_id", call_id);
+
+  if (updateError) {
+    return res.status(500).json({
+      ok: false,
+      error: updateError.message
+    });
+  }
 
   return res.status(200).json({
     ok: true,
